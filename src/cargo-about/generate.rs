@@ -47,9 +47,9 @@ pub fn cmd(
             "json",
             Box::new(
                 |h: &Helper<'_, '_>,
-                 _r: &Handlebars,
+                 _r: &Handlebars<'_>,
                  _: &Context,
-                 _rc: &mut RenderContext<'_>,
+                 _rc: &mut RenderContext<'_, '_>,
                  out: &mut dyn Output|
                  -> HelperResult {
                     let param = h
@@ -159,7 +159,7 @@ struct Input<'a> {
 fn generate(
     nfos: &[licenses::KrateLicense<'_>],
     resolved: &licenses::Resolved,
-    hbs: &Handlebars,
+    hbs: &Handlebars<'_>,
     template_name: &str,
 ) -> Result<String, Error> {
     let licenses = {
