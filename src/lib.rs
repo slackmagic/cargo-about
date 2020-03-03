@@ -9,6 +9,15 @@ pub mod licenses;
 
 pub struct Krate(cm::Package);
 
+impl krates::KrateDetails for Krate {
+    fn name(&self) -> &str {
+        &self.0.name
+    }
+    fn version(&self) -> &krates::semver::Version {
+        &self.0.version
+    }
+}
+
 impl From<cm::Package> for Krate {
     fn from(mut pkg: cm::Package) -> Self {
         // Fix the license field as cargo used to allow the

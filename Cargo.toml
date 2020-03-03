@@ -40,3 +40,11 @@ smallvec = "1.2.0"
 spdx = "0.3.3"
 structopt = "0.3.11"
 toml = "0.5.6"
+url = "2.1.1"
+
+[dependencies.cd]
+#optional = true
+#path = "../clearly-defined"
+git = "https://github.com/EmbarkStudios/clearly-defined"
+branch = "impl"
+features = ["blocking", "rustls"]

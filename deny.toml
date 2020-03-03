@@ -1,3 +1,16 @@
+# cargo-about is really only ever intended to run on the "normal" tier-1 targets
+targets = [
+    { triple = "x86_64-unknown-linux-gnu" },
+    { triple = "x86_64-unknown-linux-musl" },
+    { triple = "x86_64-apple-darwin" },
+    { triple = "x86_64-pc-windows-msvc" },
+]
+
+[advisories]
+ignore = [
+    "RUSTSEC-2019-0031",
+]
+
 [bans]
 multiple-versions = "deny"
 deny = [
@@ -7,6 +20,8 @@ deny = [
 skip = [
     # clap uses old ansi-term
     { name = "ansi_term", version = "0.11.0" },
+    # old mio :(
+    { name = "winapi", version = "=0.2.8" },
 ]
 
 [licenses]
@@ -19,3 +34,10 @@ allow = [
     "Apache-2.0",
     "MIT",
 ]
+exceptions = [
+    { allow = ["MPL-2.0"], name = "webpki-roots" },
+    { allow = ["ISC"], name = "untrusted" },
+]
+
+[sources]
+unknown-git = "allow"
