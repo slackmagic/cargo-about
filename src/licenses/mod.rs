@@ -7,6 +7,7 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
+use tracing::{debug, error, info, warn};
 
 pub mod config;
 
@@ -77,6 +78,13 @@ impl<'a> Summary<'a> {
 }
 
 #[derive(Debug)]
+struct CDFile {
+    path: PathBuf,
+    hash: String,
+    expr: String,
+}
+
+#[derive(Debug)]
 struct CDDef<'a> {
     /// The id of the crate for the definition
     id: &'a krates::Kid,
@@ -84,6 +92,7 @@ struct CDDef<'a> {
     declared: String,
     /// The individual (usually) SPDX license identifiers that were actually discovered
     discovered: Vec<String>,
+    license_files: Vec<CDFile>,
 }
 
 /// Attempts to retrieve licensing terms for every (remote) crate from
@@ -99,7 +108,7 @@ fn get_clearly_defined<'k>(krates: &'k crate::Krates) -> Vec<CDDef<'k>> {
             let k = &k.krate;
 
             // Ignore crates that have a non-github/crates.io source
-            if let Some(src) = &k.source.and_then(|s| url::Url::parse(&format!("{}", s)).ok()) {
+            if let Some(src) = &k.src  {
                 let (shape, provider, ns) = match src.host() {
                     Some(url::Host::Domain("crates.io")) => {
                         (cd::Shape::Crate, cd::Provider::CratesIo, None)
@@ -112,7 +121,7 @@ fn get_clearly_defined<'k>(krates: &'k crate::Krates) -> Vec<CDDef<'k>> {
                                 (cd::Shape::Git, cd::Provider::Github, Some((&path[..ind]).to_owned()))
                             }
                             None => {
-                                log::warn!("crate '{}' uses malformed github URL '{}'", k.id, src);
+                                warn!(krate = %k, url = %src, "detected malformed github URL");
                                 return None;
                             }
                         }
@@ -121,7 +130,7 @@ fn get_clearly_defined<'k>(krates: &'k crate::Krates) -> Vec<CDDef<'k>> {
                         // TODO: support alternative registries in a possible future
                         // where clearlydefined supports them, but for now just
                         // log that we found it and move on
-                        log::warn!("crate '{}' is sourced from a location incompatible with clearlydefined.io and will be ignored", k.id);
+                        warn!("crate '{}' is sourced from a location incompatible with clearlydefined.io and will be ignored", k.id);
                         return None;
                     }
                     None => return None,
@@ -155,30 +164,69 @@ fn get_clearly_defined<'k>(krates: &'k crate::Krates) -> Vec<CDDef<'k>> {
                                 }
                             };
 
-                            match &node.krate.source {
+                            match &node.krate.src {
                                 Some(src) => {
-                                    version_match && (def.coordinates.provider == cd::Provider::CratesIo && src.is_default_registry() || def.coordinates.provider == cd::Provider::Github && src.is_git() && src.url().host() == Some(url::Host::Domain("github.com")))
+                                    match src.host() {
+                                        Some(url::Host::Domain("crates.io")) => {
+                                            version_match && def.coordinates.provider == cd::Provider::CratesIo
+                                        }
+                                        Some(url::Host::Domain("github.com")) => {
+                                            version_match && def.coordinates.provider == cd::Provider::Github
+                                        }
+                                        _ => false,
+                                    }
                                 }
                                 None => false,
                             }
                         }).and_then(|(_, node)| {
+                            let files = def.files;
                             def.licensed.map(|lic| {
+                                // Get all of the license files that were discovered by clearlydefined
+                                let license_files = files.into_iter().filter_map(|file| {
+                                    // clearlydefined tags files with "natures", LICENSE files are tagged with the
+                                    // license nature to indicate they are license text and (probably) don't have any
+                                    // actual code in them
+                                    if !file.natures.iter().any(|s| s == "license") {
+                                        return None;
+                                    }
+
+                                    match (file.license, file.hashes) {
+                                        (Some(lic), Some(hashes)) => {
+                                            Some(CDFile {
+                                                expr: lic,
+                                                hash: match hashes.sha256 {
+                                                    Some(h) => h,
+                                                    None => hashes.sha1,
+                                                },
+                                                path: PathBuf::from(file.path),
+                                            })
+                                        }
+                                        _ => None,
+                                    }
+                                }).collect();
+
                                 CDDef {
                                     id: &node.krate.id,
                                     declared: lic.declared,
                                     discovered: lic.facets.core.discovered.expressions,
+                                    license_files,
                                 }
                             })
                         })
                     })
             })
         }) {
-            cded.extend(response.into_iter());
+            cded.extend(response);
         }
     }
 
     cded.sort_by_key(|cd: &CDDef<'_>| cd.id);
     cded
+}
+
+fn gather_clearly_defined(clearly_defed: &CDDef<'_>) -> Result<Vec<LicenseFile>, Error> {
+    // Validate
+    unimplemented!();
 }
 
 pub struct Gatherer {
@@ -205,8 +253,6 @@ impl Gatherer {
         self
     }
 
-    fn get_clearly_defined<'k>(&self, krates: &'k Krates) -> Vec<CDDef<'k>> {}
-
     pub fn gather<'k>(self, krates: &'k Krates, cfg: &config::Config) -> Summary<'k> {
         let mut summary = Summary::new(self.store);
 
@@ -223,6 +269,8 @@ impl Gatherer {
             .optimize(false)
             .max_passes(1);
 
+        let cded = get_clearly_defined(krates);
+
         summary.nfos = krates
             .krates()
             .par_bridge()
@@ -236,54 +284,152 @@ impl Gatherer {
                         // * It also just does basic lexing, so parens, duplicate operators,
                         // unpaired exceptions etc can all fail validation
 
-                        match spdx::Expression::parse(license_field) {
+                        match spdx::Expression::parse_mode(license_field, spdx::ParseMode::Lax) {
                             Ok(validated) => LicenseInfo::Expr(validated),
                             Err(err) => {
-                                log::error!(
-                                    "unable to parse license expression for '{} - {}': {}",
-                                    krate.name,
-                                    krate.version,
-                                    err
+                                error!(
+                                    krate = %krate,
+                                    err = %err.reason,
+                                    license = %license_field,
+                                    "unable to parse license expression",
                                 );
                                 LicenseInfo::Unknown
                             }
                         }
                     }
                     None => {
-                        log::debug!(
-                            "crate '{}({})' doesn't have a license field",
-                            krate.name,
-                            krate.version,
+                        debug!(
+                            krate = %krate,
+                            "crate doesn't have a license field",
                         );
                         LicenseInfo::Unknown
                     }
                 };
 
+                let clearly_defed = cded
+                    .binary_search_by(|cd: &CDDef<'_>| cd.id.cmp(&krate.id))
+                    .map(|ind| &cded[ind])
+                    .ok();
+
+                // Check if clearly defined had a definition for the krate in
+                // question.
+                let use_clearly_defined = if let Some(clearly_defed) = clearly_defed {
+                    // Use relaxed parsing rules for SPDX expressions from clearlydefined, as, for example
+                    // there "may" be some non-valid license identifiers in the harvested data
+                    match spdx::Expression::parse_mode(
+                        &clearly_defed.declared,
+                        spdx::ParseMode::Lax,
+                    ) {
+                        Ok(expr) => {
+                            // Only scan files if the crate's declared expression doesn't match the one on clearlydefined.io,
+                            // as they do more in depth analysis and attribution detection that should be more accurate
+                            // than what we could gather ourselves
+                            if let LicenseInfo::Expr(declared) = &info {
+                                // clearlydefined has a bug where `/` is interpreted as `AND` rather than `OR`
+                                // so ignore
+                                let has_slashes = declared.as_ref().contains("/");
+                                use spdx::expression::{ExprNode, Operator as Op};
+
+                                let matches =
+                                    declared.iter().zip(expr.iter()).all(|(d, e)| match (d, e) {
+                                        (ExprNode::Req(dl), ExprNode::Req(el)) => {
+                                            dl.req.license.id() == el.req.license.id()
+                                        }
+                                        (ExprNode::Op(dop), ExprNode::Op(eop)) => {
+                                            dop == eop
+                                                || (dop == &Op::Or
+                                                    && eop == &Op::And
+                                                    && has_slashes)
+                                        }
+                                        _ => false,
+                                    });
+
+                                if !matches {
+                                    error!(
+                                        "crate '{}' clearlydefined.io {}",
+                                        declared, clearly_defed.declared,
+                                    );
+                                }
+
+                                matches
+                            } else {
+                                false
+                            }
+                        }
+                        Err(err) => {
+                            warn!(
+                                err = %err.reason,
+                                expr = %clearly_defed.declared,
+                                "unable to parse declared expression from clearlydefined.io",
+                            );
+                            false
+                        }
+                    }
+                } else {
+                    false
+                };
+
                 let root_path = krate.manifest_path.parent().unwrap();
                 let krate_cfg = cfg.crates.get(&krate.name);
 
-                let mut license_files = match scan_files(
-                    &root_path,
-                    &strategy,
-                    threshold,
-                    krate_cfg.map(|kc| (kc, krate.name.as_str())),
-                ) {
-                    Ok(files) => files,
-                    Err(err) => {
-                        log::error!(
-                            "unable to scan for license files for crate '{} - {}': {}",
-                            krate.name,
-                            krate.version,
-                            err
-                        );
+                let mut license_files = if use_clearly_defined {
+                    match gather_clearly_defined(clearly_defed.unwrap()) {
+                        Ok(cded) => {
+                            debug!(
+                                krate = %krate,
+                                gathered = cded.len(),
+                                "gathered license files based on clearlydefined.io definition",
+                            );
+                            cded
+                        }
+                        Err(err) => {
+                            error!(
+                                krate = %krate,
+                                %err,
+                                "failed to scan license files determined by clearlydefined.io",
+                            );
 
-                        Vec::new()
+                            match scan_files(
+                                &root_path,
+                                &strategy,
+                                threshold,
+                                krate_cfg.map(|kc| (kc, krate.name.as_str())),
+                            ) {
+                                Ok(files) => files,
+                                Err(err) => {
+                                    error!(
+                                        krate = %krate,
+                                        %err,
+                                        "unable to scan license files for crate",
+                                    );
+
+                                    Vec::new()
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    match scan_files(
+                        &root_path,
+                        &strategy,
+                        threshold,
+                        krate_cfg.map(|kc| (kc, krate.name.as_str())),
+                    ) {
+                        Ok(files) => files,
+                        Err(err) => {
+                            error!(
+                                krate = %krate,
+                                %err,
+                                "unable to scan license files for crate",
+                            );
+
+                            Vec::new()
+                        }
                     }
                 };
 
                 // Condense each license down to the best candidate if
                 // multiple are found
-
                 license_files.sort_by(|a, b| {
                     use std::cmp::Ordering as Ord;
                     match a.id.cmp(&b.id) {
@@ -349,7 +495,7 @@ fn scan_files(
     let license_files: Vec<_> = files
         .into_par_iter()
         .filter_map(|file| {
-            log::trace!("scanning file {}", file.path().display());
+            tracing::trace!(path = %file.path().display(), "scanning file");
 
             if let Some(ft) = file.file_type() {
                 if ft.is_dir() {
@@ -364,7 +510,7 @@ fn scan_files(
 
                 if let Ok(md) = file.metadata() {
                     if md.file_type().is_fifo() {
-                        log::error!("skipping FIFO {}", file.path().display());
+                        error!(path = %file.path().display(), "skipping FIFO");
                         return None;
                     }
                 }
@@ -403,10 +549,10 @@ fn scan_files(
                                 }
 
                                 if relative.starts_with(&additional.root) {
-                                    log::trace!(
-                                        "skipping {} due to addendum for root {}",
-                                        file.path().display(),
-                                        additional.root.display()
+                                    tracing::trace!(
+                                        path = %file.path().display(),
+                                        root = %additional.root.display(),
+                                        "skipping path due to addendum",
                                     );
                                     return None;
                                 }
@@ -432,11 +578,11 @@ fn read_file(path: &Path) -> Option<String> {
         Err(ref e) if e.kind() == std::io::ErrorKind::InvalidData => {
             // If we fail due to invaliddata, it just means the file in question was
             // probably binary and didn't have valid utf-8 data, so we can ignore it
-            log::debug!("binary file {} detected", path.display());
+            debug!(path = %path.display(), "ignoring binary file");
             None
         }
         Err(e) => {
-            log::error!("failed to read '{}': {}", path.display(), e);
+            error!(error = %e, path = %path.display(), "failed to read file");
             None
         }
         Ok(c) => Some(c),
@@ -472,17 +618,17 @@ fn check_is_license_file(
         ScanResult::Header(ided) => {
             if let Some((exp_id, addendum)) = expected {
                 if exp_id != ided.id {
-                    log::error!(
-                        "expected license '{}' in path '{}', but found '{}'",
-                        exp_id.name,
-                        path.display(),
-                        ided.id.name
+                    error!(
+                        expected = exp_id.name,
+                        discovered = ided.id.name,
+                        path = %path.display(),
+                        "discovered license did not match expected license",
                     );
                 } else if addendum.is_none() {
-                    log::debug!(
-                        "ignoring '{}', matched license '{}'",
-                        path.display(),
-                        ided.id.name
+                    debug!(
+                        license = ided.id.name,
+                        path = %path.display(),
+                        "ignoring file, matched expected license",
                     );
                     return None;
                 }
@@ -498,21 +644,21 @@ fn check_is_license_file(
         ScanResult::Text(ided) => {
             let info = if let Some((exp_id, addendum)) = expected {
                 if exp_id != ided.id {
-                    log::error!(
-                        "expected license '{}' in path '{}', but found '{}'",
-                        exp_id.name,
-                        path.display(),
-                        ided.id.name
+                    error!(
+                        expected = exp_id.name,
+                        discovered = ided.id.name,
+                        path = %path.display(),
+                        "discovered license did not match expected license",
                     );
                 }
 
                 match addendum {
                     Some(path) => LicenseFileInfo::AddendumText(contents, path.clone()),
                     None => {
-                        log::debug!(
-                            "ignoring '{}', matched license '{}'",
-                            path.display(),
-                            ided.id.name
+                        debug!(
+                            expected = ided.id.name,
+                            path = %path.display(),
+                            "ignoring file, matched expected license",
                         );
                         return None;
                     }
@@ -529,19 +675,19 @@ fn check_is_license_file(
             })
         }
         ScanResult::UnknownId(id_str) => {
-            log::error!(
-                "found unknown SPDX identifier '{}' scanning '{}'",
-                id_str,
-                path.display()
+            error!(
+                id = %id_str,
+                path = %path.display(),
+                "found unknown SPDX identifier",
             );
             None
         }
         ScanResult::LowLicenseChance(ided) => {
-            log::debug!(
-                "found '{}' scanning '{}' but it only has a confidence score of {}",
-                ided.id.name,
-                path.display(),
-                ided.confidence
+            debug!(
+                license = ided.id.name,
+                path = %path.display(),
+                score = (ided.confidence * 100.0) as u32,
+                "ignoring license file with low confidence",
             );
             None
         }

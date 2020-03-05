@@ -4,6 +4,7 @@
 use anyhow::{anyhow, bail, Context, Error};
 use std::path::{Path, PathBuf};
 use structopt::StructOpt;
+use tracing_subscriber::filter::LevelFilter;
 
 mod generate;
 mod init;
@@ -17,8 +18,8 @@ enum Command {
     Init(init::Args),
 }
 
-fn parse_level(s: &str) -> Result<log::LevelFilter, Error> {
-    s.parse::<log::LevelFilter>()
+fn parse_level(s: &str) -> Result<LevelFilter, Error> {
+    s.parse::<LevelFilter>()
         .map_err(|e| anyhow!("failed to parse level '{}': {}", s, e))
 }
 
@@ -41,7 +42,7 @@ Possible values:
 * debug
 * trace"
     )]
-    log_level: log::LevelFilter,
+    log_level: LevelFilter,
     /// Space-separated list of features to activate
     #[structopt(long)]
     features: Vec<String>,
@@ -59,30 +60,22 @@ Possible values:
     cmd: Command,
 }
 
-fn setup_logger(level: log::LevelFilter) -> Result<(), fern::InitError> {
-    use ansi_term::Color::*;
-    use log::Level::*;
+fn setup_logger(level: LevelFilter) -> Result<(), Error> {
+    let mut env_filter = tracing_subscriber::EnvFilter::from_default_env();
 
-    fern::Dispatch::new()
-        .level(log::LevelFilter::Warn)
-        .level_for("cargo_about", level)
-        .format(move |out, message, record| {
-            out.finish(format_args!(
-                "{date} [{level}] {message}\x1B[0m",
-                date = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S"),
-                level = match record.level() {
-                    Error => Red.paint("ERROR"),
-                    Warn => Yellow.paint("WARN"),
-                    Info => Green.paint("INFO"),
-                    Debug => Blue.paint("DEBUG"),
-                    Trace => Purple.paint("TRACE"),
-                },
-                message = message,
-            ));
-        })
-        .chain(std::io::stderr())
-        .apply()?;
-    Ok(())
+    // If a user specifies a log level, we assume it only pertains to cargo_fetcher,
+    // if they want to trace other crates they can use the RUST_LOG env approach
+    env_filter = env_filter.add_directive(args.log_level.into());
+
+    let subscriber = tracing_subscriber::FmtSubscriber::builder().with_env_filter(env_filter);
+
+    if args.json {
+        tracing::subscriber::set_global_default(subscriber.json().finish())
+            .context("failed to set default subscriber")?;
+    } else {
+        tracing::subscriber::set_global_default(subscriber.finish())
+            .context("failed to set default subscriber")?;
+    };
 }
 
 fn load_config(manifest_path: &Path) -> Result<cargo_about::licenses::config::Config, Error> {
@@ -109,14 +102,14 @@ fn load_config(manifest_path: &Path) -> Result<cargo_about::licenses::config::Co
             let contents = std::fs::read_to_string(&about_toml)?;
             let cfg = toml::from_str(&contents)?;
 
-            log::info!("loaded config from {}", about_toml.display());
+            tracing::info!(path = %about_toml.display(), "loaded config");
             return Ok(cfg);
         }
 
         parent = p.parent();
     }
 
-    log::warn!("no 'about.toml' found, falling back to default configuration");
+    tracing::warn!("no 'about.toml' found, falling back to default configuration");
     Ok(cargo_about::licenses::config::Config::default())
 }
 
@@ -151,10 +144,11 @@ fn real_main() -> Result<(), Error> {
     }
 
     let cfg = load_config(&manifest_path)?;
+    use tracing::info;
 
     let (all_crates, store) = rayon::join(
         || {
-            log::info!("gathering crates for {}", manifest_path.display());
+            info!(manifest = %manifest_path.display(), "gathering crates");
             cargo_about::get_all_crates(
                 manifest_path,
                 args.no_default_features,
@@ -164,7 +158,7 @@ fn real_main() -> Result<(), Error> {
             )
         },
         || {
-            log::info!("loading license store");
+            info!("loading license store");
             cargo_about::licenses::LicenseStore::from_cache()
         },
     );
@@ -172,7 +166,7 @@ fn real_main() -> Result<(), Error> {
     let all_crates = all_crates?;
     let store = store?;
 
-    log::info!("gathered {} crates", all_crates.len());
+    info!(count = all_crates.len(), "gathered crates");
 
     match args.cmd {
         Command::Generate(gen) => generate::cmd(gen, cfg, all_crates, store),
@@ -184,7 +178,7 @@ fn main() {
     match real_main() {
         Ok(_) => {}
         Err(e) => {
-            log::error!("{:#}", e);
+            tracing::error!("{:#}", e);
             std::process::exit(1);
         }
     }

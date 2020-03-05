@@ -162,6 +162,8 @@ fn generate(
     hbs: &Handlebars<'_>,
     template_name: &str,
 ) -> Result<String, Error> {
+    use tracing::warn;
+
     let licenses = {
         let mut licenses = BTreeMap::new();
         for (krate_id, license_list) in &resolved.0 {
@@ -198,20 +200,20 @@ fn generate(
                                 used_by: Vec::new(),
                             });
                             if license.is_none() {
-                                log::warn!(
-                                    "No licene file or license text found for {} in crate {}",
-                                    id.name,
-                                    krate_license.krate.name
+                                warn!(
+                                    license = %id.name,
+                                    krate = %krate_license.krate,
+                                    "No license file or license text discovered for declared license",
                                 );
                             }
                             license
                         })
                     }
                     _ => {
-                        log::warn!(
-                            "{} has no license file for crate '{}'",
-                            license,
-                            krate_license.krate.name
+                        warn!(
+                            %license,
+                            krate = %krate_license.krate,
+                            "No license file or license text discovered for declared license",
                         );
                         None
                     }

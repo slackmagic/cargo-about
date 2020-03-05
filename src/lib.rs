@@ -7,14 +7,17 @@ use std::fmt;
 
 pub mod licenses;
 
-pub struct Krate(cm::Package);
+pub struct Krate {
+    pub inner: cm::Package,
+    pub src: Option<url::Url>,
+}
 
 impl krates::KrateDetails for Krate {
     fn name(&self) -> &str {
-        &self.0.name
+        &self.inner.name
     }
     fn version(&self) -> &krates::semver::Version {
-        &self.0.version
+        &self.inner.version
     }
 }
 
@@ -22,17 +25,24 @@ impl From<cm::Package> for Krate {
     fn from(mut pkg: cm::Package) -> Self {
         // Fix the license field as cargo used to allow the
         // invalid / separator
-        if let Some(ref mut lf) = pkg.license {
-            *lf = lf.replace("/", " OR ");
-        }
+        // if let Some(ref mut lf) = pkg.license {
+        //     *lf = lf.replace("/", " OR ");
+        // }
 
-        Self(pkg)
+        // Rip out the source once as it's a type that is just wrapping a
+        // private string making it annoying to use
+        let src = pkg
+            .source
+            .take()
+            .and_then(|src| url::Url::parse(&format!("{}", src)).ok());
+
+        Self { inner: pkg, src }
     }
 }
 
 impl fmt::Display for Krate {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{} {}", self.0.name, self.0.version)
+        write!(f, "{} {}", self.inner.name, self.inner.version)
     }
 }
 
@@ -40,7 +50,7 @@ impl std::ops::Deref for Krate {
     type Target = cm::Package;
 
     fn deref(&self) -> &Self::Target {
-        &self.0
+        &self.inner
     }
 }
 
@@ -80,15 +90,30 @@ pub fn get_all_crates(
 
     builder.include_targets(cfg.targets.iter().map(|triple| (triple.as_str(), vec![])));
 
+    use tracing::debug;
+
     let graph = builder.build(mdc, |filtered: cm::Package| match filtered.source {
         Some(src) => {
             if src.is_crates_io() {
-                log::debug!("filtered {} {}", filtered.name, filtered.version);
+                debug!(
+                    name = %filtered.name,
+                    version = %filtered.version,
+                    "filtered crate",
+                );
             } else {
-                log::debug!("filtered {} {} {}", filtered.name, filtered.version, src);
+                debug!(
+                    name = %filtered.name,
+                    version = %filtered.version,
+                    %src,
+                    "filtered crate"
+                );
             }
         }
-        None => log::debug!("filtered crate {} {}", filtered.name, filtered.version),
+        None => debug!(
+            name = %filtered.name,
+            version = %filtered.version,
+            "filtered crate"
+        ),
     })?;
 
     Ok(graph)
