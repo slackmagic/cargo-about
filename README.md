@@ -3,6 +3,7 @@
 [![Build Status](https://github.com/EmbarkStudios/cargo-about/workflows/CI/badge.svg)](https://github.com/EmbarkStudios/cargo-about/actions?workflow=CI)
 [![Crates.io](https://img.shields.io/crates/v/cargo-about.svg)](https://crates.io/crates/cargo-about)
 [![Docs](https://docs.rs/cargo-about/badge.svg)](https://docs.rs/cargo-about)
+[![SPDX Version](https://img.shields.io/badge/SPDX%20Version-3.8-blue.svg)](https://spdx.org/licenses/)
 [![Contributor Covenant](https://img.shields.io/badge/contributor%20covenant-v1.4%20adopted-ff69b4.svg)](CODE_OF_CONDUCT.md)
 [![Embark](https://img.shields.io/badge/embark-open%20source-blueviolet.svg)](https://embark.dev)
 

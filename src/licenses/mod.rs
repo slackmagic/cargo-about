@@ -224,9 +224,130 @@ fn get_clearly_defined<'k>(krates: &'k crate::Krates) -> Vec<CDDef<'k>> {
     cded
 }
 
-fn gather_clearly_defined(clearly_defed: &CDDef<'_>) -> Result<Vec<LicenseFile>, Error> {
-    // Validate
-    unimplemented!();
+/// Gather only the files that clearlydefined has already identified as license files, if a single
+/// error is encountered for any reason we fail the entire set of possibilities
+fn gather_clearly_defined(
+    root: &Path,
+    clearly_defed: &CDDef<'_>,
+) -> Result<Vec<LicenseFile>, Error> {
+    let map = |f: &CDFile| -> Result<LicenseFile, Error> {
+        let full_path = root.join(&f.path);
+        let contents = std::fs::read_to_string(&full_path)?;
+
+        use ring::digest;
+        // Validate that the hashes match
+        let algo = match f.hash.len() {
+            // sha1
+            40 => &digest::SHA1_FOR_LEGACY_USE_ONLY,
+            // sha256
+            64 => &digest::SHA256,
+            _ => bail!("unknown digest algorithm used by clearlydefined.io"),
+        };
+
+        let sha_digest = digest::digest(algo, contents.as_bytes());
+        let digest = sha_digest.as_ref();
+
+        for (ind, exp) in f.hash.as_bytes().chunks(2).enumerate() {
+            let mut cur = match exp[0] {
+                b'A'..=b'F' => exp[0] - b'A' + 10,
+                b'a'..=b'f' => exp[0] - b'a' + 10,
+                b'0'..=b'9' => exp[0] - b'0',
+                c => bail!("invalid byte in expected checksum string {}", c),
+            };
+
+            cur <<= 4;
+
+            cur |= match exp[1] {
+                b'A'..=b'F' => exp[1] - b'A' + 10,
+                b'a'..=b'f' => exp[1] - b'a' + 10,
+                b'0'..=b'9' => exp[1] - b'0',
+                c => bail!("invalid byte in expected checksum string {}", c),
+            };
+
+            if digest[ind] != cur {
+                bail!("checksum mismatch, expected {}", f.hash);
+            }
+        }
+
+        match spdx::Expression::parse_mode(&f.expr, spdx::ParseMode::Lax) {
+            Ok(validated) => {
+                Ok(LicenseFile {
+                    id: validated
+                        .requirements()
+                        .filter_map(|req| req.req.license.id())
+                        .collect(),
+                    path: full_path,
+                    // clearlydefined only keeps scores on a package level, not an individual
+                    // file level, so just make this up
+                    confidence: 0.95,
+                    info: LicenseFileInfo::Text(contents),
+                })
+            }
+            Err(err) => {
+                error!(
+                    err = %err.reason,
+                    license = %f.expr,
+                    "unable to parse license expression",
+                );
+
+                // ParseError uses a lifetime...my fault
+                bail!("failed to parse expression: {}", err);
+            }
+        }
+    };
+
+    clearly_defed
+        .license_files
+        .iter()
+        .map(|cdf| map(cdf))
+        .collect()
+}
+
+fn licenses_match(lic_info: &LicenseInfo, clearly_defed: &CDDef<'_>) -> bool {
+    // Use relaxed parsing rules for SPDX expressions from clearlydefined, as, for example
+    // there "may" be some non-valid license identifiers in the harvested data
+    match spdx::Expression::parse_mode(&clearly_defed.declared, spdx::ParseMode::Lax) {
+        Ok(expr) => {
+            // Only scan files if the crate's declared expression doesn't match the one on clearlydefined.io,
+            // as they do more in depth analysis and attribution detection that should be more accurate
+            // than what we could gather ourselves
+            if let LicenseInfo::Expr(declared) = &lic_info {
+                // clearlydefined has a bug where `/` is interpreted as `AND` rather than `OR`
+                // so ignore
+                let has_slashes = declared.as_ref().contains('/');
+                use spdx::expression::{ExprNode, Operator as Op};
+
+                let matches = declared.iter().zip(expr.iter()).all(|(d, e)| match (d, e) {
+                    (ExprNode::Req(dl), ExprNode::Req(el)) => {
+                        dl.req.license.id() == el.req.license.id()
+                    }
+                    (ExprNode::Op(dop), ExprNode::Op(eop)) => {
+                        dop == eop || (dop == &Op::Or && eop == &Op::And && has_slashes)
+                    }
+                    _ => false,
+                });
+
+                if !matches {
+                    error!(
+                        "crate '{}' clearlydefined.io {}",
+                        declared, clearly_defed.declared,
+                    );
+                }
+
+                matches
+            } else {
+                false
+            }
+        }
+        Err(err) => {
+            warn!(
+                err = %err.reason,
+                expr = %clearly_defed.declared,
+                "unable to parse declared expression from clearlydefined.io",
+            );
+            false
+        }
+    }
 }
 
 pub struct Gatherer {
@@ -276,6 +397,10 @@ impl Gatherer {
             .par_bridge()
             .map(|kn| {
                 let krate = &kn.krate;
+
+                let span = tracing::info_span!("gather", krate = %krate);
+                let _ = span.enter();
+
                 let info = match krate.license {
                     Some(ref license_field) => {
                         //. Reasons this can fail:
@@ -314,57 +439,7 @@ impl Gatherer {
                 // Check if clearly defined had a definition for the krate in
                 // question.
                 let use_clearly_defined = if let Some(clearly_defed) = clearly_defed {
-                    // Use relaxed parsing rules for SPDX expressions from clearlydefined, as, for example
-                    // there "may" be some non-valid license identifiers in the harvested data
-                    match spdx::Expression::parse_mode(
-                        &clearly_defed.declared,
-                        spdx::ParseMode::Lax,
-                    ) {
-                        Ok(expr) => {
-                            // Only scan files if the crate's declared expression doesn't match the one on clearlydefined.io,
-                            // as they do more in depth analysis and attribution detection that should be more accurate
-                            // than what we could gather ourselves
-                            if let LicenseInfo::Expr(declared) = &info {
-                                // clearlydefined has a bug where `/` is interpreted as `AND` rather than `OR`
-                                // so ignore
-                                let has_slashes = declared.as_ref().contains("/");
-                                use spdx::expression::{ExprNode, Operator as Op};
-
-                                let matches =
-                                    declared.iter().zip(expr.iter()).all(|(d, e)| match (d, e) {
-                                        (ExprNode::Req(dl), ExprNode::Req(el)) => {
-                                            dl.req.license.id() == el.req.license.id()
-                                        }
-                                        (ExprNode::Op(dop), ExprNode::Op(eop)) => {
-                                            dop == eop
-                                                || (dop == &Op::Or
-                                                    && eop == &Op::And
-                                                    && has_slashes)
-                                        }
-                                        _ => false,
-                                    });
-
-                                if !matches {
-                                    error!(
-                                        "crate '{}' clearlydefined.io {}",
-                                        declared, clearly_defed.declared,
-                                    );
-                                }
-
-                                matches
-                            } else {
-                                false
-                            }
-                        }
-                        Err(err) => {
-                            warn!(
-                                err = %err.reason,
-                                expr = %clearly_defed.declared,
-                                "unable to parse declared expression from clearlydefined.io",
-                            );
-                            false
-                        }
-                    }
+                    licenses_match(&info, clearly_defed)
                 } else {
                     false
                 };
@@ -373,7 +448,7 @@ impl Gatherer {
                 let krate_cfg = cfg.crates.get(&krate.name);
 
                 let mut license_files = if use_clearly_defined {
-                    match gather_clearly_defined(clearly_defed.unwrap()) {
+                    match gather_clearly_defined(&root_path, clearly_defed.unwrap()) {
                         Ok(cded) => {
                             debug!(
                                 krate = %krate,
@@ -635,7 +710,7 @@ fn check_is_license_file(
             }
 
             Some(LicenseFile {
-                id: ided.id,
+                id: vec![ided.id],
                 confidence: ided.confidence,
                 path,
                 info: LicenseFileInfo::Header,
@@ -668,7 +743,7 @@ fn check_is_license_file(
             };
 
             Some(LicenseFile {
-                id: ided.id,
+                id: vec![ided.id],
                 confidence: ided.confidence,
                 path,
                 info,
@@ -814,14 +889,16 @@ impl Resolved {
                     let license_reqs: Vec<_> = krate_license
                         .license_files
                         .iter()
-                        .map(|file| {
-                            LicenseReq {
-                                license: LicenseItem::SPDX {
-                                    id: file.id,
-                                    or_later: false,
-                                },
-                                exception: None,
-                            }
+                        .flat_map(|file| {
+                            file.id.iter().map(|id| {
+                                LicenseReq {
+                                    license: LicenseItem::SPDX {
+                                        id: *id,
+                                        or_later: false,
+                                    },
+                                    exception: None,
+                                }
+                            })
                         })
                         .collect();
 

@@ -52,6 +52,9 @@ Possible values:
     /// Do not activate the `default` feature
     #[structopt(long)]
     no_default_features: bool,
+    /// Output log messages as json
+    #[structopt(long)]
+    json: bool,
     /// The path of the Cargo.toml for the root crate, defaults to the
     /// current crate or workspace in the current working directory
     #[structopt(short, long = "manifest-path", parse(from_os_str))]
@@ -60,12 +63,12 @@ Possible values:
     cmd: Command,
 }
 
-fn setup_logger(level: LevelFilter) -> Result<(), Error> {
+fn setup_logger(args: &Opts) -> Result<(), Error> {
     let mut env_filter = tracing_subscriber::EnvFilter::from_default_env();
 
     // If a user specifies a log level, we assume it only pertains to cargo_fetcher,
     // if they want to trace other crates they can use the RUST_LOG env approach
-    env_filter = env_filter.add_directive(args.log_level.into());
+    env_filter = env_filter.add_directive(args.log_level.clone().into());
 
     let subscriber = tracing_subscriber::FmtSubscriber::builder().with_env_filter(env_filter);
 
@@ -76,6 +79,8 @@ fn setup_logger(level: LevelFilter) -> Result<(), Error> {
         tracing::subscriber::set_global_default(subscriber.finish())
             .context("failed to set default subscriber")?;
     };
+
+    Ok(())
 }
 
 fn load_config(manifest_path: &Path) -> Result<cargo_about::licenses::config::Config, Error> {
@@ -124,7 +129,7 @@ fn real_main() -> Result<(), Error> {
         })
     });
 
-    setup_logger(args.log_level)?;
+    setup_logger(&args)?;
 
     let manifest_path = args
         .manifest_path

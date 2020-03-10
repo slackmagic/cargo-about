@@ -6,6 +6,7 @@ use krates::cm;
 use std::fmt;
 
 pub mod licenses;
+pub mod overlay;
 
 pub struct Krate {
     pub inner: cm::Package,

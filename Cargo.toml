@@ -26,7 +26,9 @@ path = "src/cargo-about/main.rs"
 anyhow = "1.0.26"
 askalono = "0.4.2"
 chrono = "0.4.10"
+git2 = "0.11"
 handlebars = { version = "3.0.1", features = ["dir_source"] }
+home = "0.5.3"
 ignore = "0.4.11"
 krates = "0.2.0"
 license = "1.1.0"
@@ -37,9 +39,10 @@ serde_json = "1.0.48"
 smallvec = "1.2.0"
 spdx = "0.3.3"
 structopt = "0.3.11"
+ring = "0.16.11"
 tracing = "0.1.13"
 tracing-fmt = "0.1.1"
-tracing-subscriber = "0.2.1"
+tracing-subscriber = "0.2.2"
 toml = "0.5.6"
 url = "2.1.1"
 
@@ -49,3 +52,9 @@ url = "2.1.1"
 git = "https://github.com/EmbarkStudios/clearly-defined"
 branch = "impl"
 features = ["blocking", "rustls"]
+
+[features]
+# If enabled, vendors the openssl code and builds from source, this is needed
+# for making musl builds reliable without too much hassle
+default = ["vendored-openssl"]
+vendored-openssl = ["git2/vendored-openssl"]
