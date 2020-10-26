@@ -1,0 +1,9 @@
+[package]
+name = "dummy-toml"
+version = "0.2.2"
+description = "Cargo plugin for generating a listing of all of the crates and the the terms under which they are licensed"
+authors = ["EDMS Team ^_^"]
+edition = "2018"
+
+[dependencies]
+chrono = "0.4.19"

@@ -192,3 +192,14 @@ fn main() {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn end_to_end() {
+        assert!(true);
+        assert_eq!(1, 1);
+    }
+}
