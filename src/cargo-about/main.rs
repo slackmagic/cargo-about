@@ -196,10 +196,16 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::env;
+    use std::path::Path;
+    use std::path::PathBuf;
 
     #[test]
     fn end_to_end() {
-        assert!(true);
-        assert_eq!(1, 1);
+        let path = Path::new("./test").to_path_buf();
+        std::env::set_current_dir(&path);
+        println!("{:#?}", &env::current_dir().unwrap());
+
+        //TODO Check => https://rust-cli.github.io/book/tutorial/testing.html#generating-test-files
     }
 }
