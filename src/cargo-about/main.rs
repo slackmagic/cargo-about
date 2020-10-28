@@ -196,16 +196,22 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert_cmd::prelude::*;
+    use std::boxed::Box;
     use std::env;
     use std::path::Path;
     use std::path::PathBuf;
+    use std::process::Command;
 
     #[test]
-    fn end_to_end() {
-        let path = Path::new("./test").to_path_buf();
-        std::env::set_current_dir(&path);
-        println!("{:#?}", &env::current_dir().unwrap());
+    fn end_to_end() -> Result<(), Box<dyn std::error::Error>> {
+        std::env::set_current_dir("./test");
+        let mut cmd = Command::cargo_bin("cargo-about").unwrap();
+
+        cmd.arg("init").current_dir(&env::current_dir().unwrap());
+        cmd.assert().success();
 
         //TODO Check => https://rust-cli.github.io/book/tutorial/testing.html#generating-test-files
+        Ok(())
     }
 }

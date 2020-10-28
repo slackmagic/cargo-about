@@ -1,2 +1,4 @@
 /target
 **/*.rs.bk
+test/about.hbs
+test/Cargo.lock
